@@ -217,3 +217,38 @@ func execute(_ plan: Preview, action: Action, selection: Set<String>, discardCha
     }
     return (removed.map { "Limpo · " + $0 } + failed.map { "Pendente · " + $0 }).joined(separator:"\n")
 }
+
+struct WorktreeBatch: Identifiable {
+    let id = UUID()
+    let action: Action
+    var plans = [Preview]()
+    var skipped = [String]()
+
+    init(trees: [Tree], action: Action) {
+        self.action = action
+        for tree in trees {
+            do {
+                let plan = try preview(tree, action: action)
+                if action == .clean && plan.disk.builds.isEmpty {
+                    throw Failure("Nenhum build elegível para limpeza.")
+                }
+                plans.append(plan)
+            } catch {
+                skipped.append(tree.path + " — " + error.localizedDescription)
+            }
+        }
+    }
+
+    func run(builds: Set<String>, discardChanges: Bool) -> [String] {
+        plans.map { plan in
+            let files = builds.intersection(plan.disk.builds.map(\.path))
+            if action == .clean && files.isEmpty { return plan.tree.path + " — Nenhum build selecionado." }
+            do {
+                let result = try execute(plan,action:action,selection:files,discardChanges:discardChanges)
+                return plan.tree.path + "\n" + result
+            } catch {
+                return plan.tree.path + " — " + error.localizedDescription
+            }
+        } + skipped
+    }
+}

@@ -10,15 +10,12 @@ import SwiftUI
     @Published var free: Int64?
     @Published var alert: String?
     @Published var operating = false
-    @Published var confirmation: Confirmation?
+    @Published var confirmation: WorktreeBatch?
+    @Published var batchReport: [String]?
     var job: Task<Void,Never>?
     private var refreshPending = false
     private var changedDuringScan = Set<String>()
     var store: Store?
-    struct Confirmation: Identifiable {
-        let id = UUID()
-        let plan: Preview, action: Action
-    }
     init() {
         do {
             let directory = try fm.url(for:.applicationSupportDirectory,in:.userDomainMask,appropriateFor:nil,create:true)
@@ -113,36 +110,38 @@ import SwiftUI
         save("roots",roots)
         if scanning { refreshPending = true } else { refresh() }
     }
-    func prepare(_ tree: Tree, _ action: Action) {
+    func prepare(_ trees: [Tree], _ action: Action) {
+        guard !operating, confirmation == nil, !trees.isEmpty else { return }
         operating = true
         Task {
-            do {
-                let plan = try await Task.detached(priority:.userInitiated) { try preview(tree,action:action) }.value
-                if action == .clean && plan.disk.builds.isEmpty { throw Failure("Nenhum build elegível para limpeza.") }
-                confirmation = Confirmation(plan:plan,action:action)
-            } catch { alert = error.localizedDescription }
+            let batch = await Task.detached(priority:.userInitiated) { WorktreeBatch(trees:trees,action:action) }.value
+            confirmation = batch
             operating = false
         }
     }
-    func apply(_ sheet: Confirmation, selection: Set<String>, discardChanges: Bool) {
+    func apply(_ batch: WorktreeBatch, selection: Set<String>, discardChanges: Bool) {
+        guard !operating, confirmation?.id == batch.id else { return }
         confirmation = nil; operating = true
         Task {
-            do {
-                alert = try await Task.detached(priority:.userInitiated) { try execute(sheet.plan,action:sheet.action,selection:selection,discardChanges:discardChanges) }.value
-            } catch { alert = error.localizedDescription }
-            let tree = sheet.plan.tree
-            changedDuringScan.insert(tree.path)
-            if metadata(tree.path) == nil {
-                rows.removeValue(forKey: tree.path)
-            } else {
-                let excluded = Set(rows.keys).subtracting([tree.path])
-                let (disk, state) = await Task.detached(priority:.utility) {
-                    var links = Set<Inode>()
-                    return (measure(tree,excluded:excluded,links:&links), gitState(tree))
-                }.value
-                rows[tree.path]?.disk = disk
-                rows[tree.path]?.state = state
+            let results = await Task.detached(priority:.userInitiated) {
+                batch.run(builds:selection,discardChanges:discardChanges)
+            }.value
+            for plan in batch.plans {
+                let tree = plan.tree
+                changedDuringScan.insert(tree.path)
+                if metadata(tree.path) == nil {
+                    rows.removeValue(forKey:tree.path)
+                } else {
+                    let excluded = Set(rows.keys).subtracting([tree.path])
+                    let (disk, state) = await Task.detached(priority:.utility) {
+                        var links = Set<Inode>()
+                        return (measure(tree,excluded:excluded,links:&links), gitState(tree))
+                    }.value
+                    rows[tree.path]?.disk = disk
+                    rows[tree.path]?.state = state
+                }
             }
+            batchReport = results
             free = (try? url(NSHomeDirectory()).resourceValues(forKeys:[.volumeAvailableCapacityKey]).volumeAvailableCapacity).map(Int64.init)
             save("rows",rows)
             operating = false

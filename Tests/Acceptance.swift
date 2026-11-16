@@ -127,6 +127,21 @@ import Foundation
         guard let saved = retry.backupBranch else { throw Failure("Backup esperado na nova prévia.") }
         _ = try execute(retry,action:.remove,selection:[],discardChanges:true)
         try check(!fm.fileExists(atPath:work) && git(main,["rev-parse","refs/heads/" + saved]).text == detached.head,"backup preserva o commit exato após remoção")
+        let second = base + "/second", locked = base + "/locked"
+        for path in [work,second,locked] {
+            try command(main,["worktree","add","--detach",path])
+            try write(path + "/.build/output","build")
+        }
+        try command(main,["worktree","lock",locked])
+        let group = try listing(main)
+        let cleanBatch = WorktreeBatch(trees:group,action:.clean)
+        try check(cleanBatch.plans.count == 2 && cleanBatch.skipped.count == 1,"prévia distingue o worktree travado")
+        _ = cleanBatch.run(builds:[work + "/.build",second + "/.build"],discardChanges:false)
+        try check(!fm.fileExists(atPath:work + "/.build") && !fm.fileExists(atPath:second + "/.build") && fm.fileExists(atPath:locked + "/.build/output"),"limpeza em lote respeita bloqueio")
+        let removeBatch = WorktreeBatch(trees:group,action:.remove)
+        try write(work + "/new.txt","edição posterior à prévia")
+        let outcomes = removeBatch.run(builds:[],discardChanges:false)
+        try check(outcomes.count == 3 && fm.fileExists(atPath:work + "/new.txt") && !fm.fileExists(atPath:second) && fm.fileExists(atPath:locked),"remoção em lote continua após falha individual")
         let store = try Store(directory:url(base + "/cache"))
         try store.save("sample",items); try check(store.read("sample",as:[Tree].self) == items,"SQLite")
         print("OK · inventário, du, builds, Git, PRs simulados, limpeza, revalidação e SQLite")

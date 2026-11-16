@@ -39,7 +39,7 @@ struct Dashboard: View {
     @State private var merged = false
     @State private var dirty = false
     @State private var settings = false
-    @State private var selection: String?
+    @State private var selection = Set<String>()
     var filtered: [Row] {
         model.rows.values.filter { row in
             (tool == "Todas" || row.tool == tool) && (!merged || row.pull?.label == "Integrado") &&
@@ -49,6 +49,7 @@ struct Dashboard: View {
     }
     var body: some View {
         let list = filtered
+        let selectedRows = list.filter { selection.contains($0.id) }
         HStack(spacing:0) {
             sidebar
             Divider()
@@ -73,7 +74,13 @@ struct Dashboard: View {
                 Text("Worktrees").font(.title2.bold())
                 Text(String(list.count)).foregroundStyle(.secondary).monospacedDigit()
                 Spacer()
-                Text("Maior ocupação primeiro").font(.caption).foregroundStyle(.secondary)
+                if selectedRows.count > 1 {
+                    Text("\(selectedRows.count) selecionados").font(.callout)
+                    Button("Limpar builds…") { model.prepare(selectedRows.map(\.tree),.clean) }
+                    Button("Remover selecionados…",role:.destructive) { model.prepare(selectedRows.map(\.tree),.remove) }
+                } else {
+                    Text("⌘ + clique ou ⇧ + clique para selecionar vários").font(.caption).foregroundStyle(.secondary)
+                }
             }
             HSplitView {
                 Table(list,selection:$selection) {
@@ -98,7 +105,7 @@ struct Dashboard: View {
                     TableColumn("Atividade") { row in Text(when(row.state?.active)).font(.caption) }.width(min:72,ideal:110)
                     TableColumn("Git / PR") { row in GitBadges(row:row) }.width(min:68,ideal:92)
                 }.frame(minWidth:484)
-                if let selection, let row = list.first(where:{ $0.id == selection }) {
+                if selectedRows.count == 1, let row = selectedRows.first {
                     Inspector(row:row,model:model).frame(minWidth:245,idealWidth:295,maxWidth:350)
                 }
             }.overlay {
@@ -108,6 +115,14 @@ struct Dashboard: View {
             }
             if let msg = model.issues.first { Text(msg).font(.caption).foregroundStyle(.secondary).help(model.issues.joined(separator:"\n")) }
         }.padding(20)
+        }
+        .onChange(of:list.map(\.id)) { _, visible in selection.formIntersection(visible) }
+        .sheet(isPresented:Binding(get:{ model.batchReport != nil },set:{ if !$0 { model.batchReport = nil } })) {
+            VStack(alignment:.leading,spacing:12) {
+                Text("Resultado da operação").font(.title2.bold())
+                ScrollView { Text((model.batchReport ?? []).joined(separator:"\n\n")).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading) }
+                Button("Concluir") { model.batchReport = nil }.keyboardShortcut(.defaultAction)
+            }.padding(24).frame(width:580,height:350)
         }
         .sheet(isPresented:$settings) { RootSettings(model:model) }
         .sheet(item:$model.confirmation) { sheet in ConfirmationView(sheet:sheet,model:model) }
@@ -217,8 +232,8 @@ struct Inspector: View {
                     HStack { Text(url(folder.path).lastPathComponent).lineLimit(1); Spacer(); Text(size(folder.bytes)).monospacedDigit() }.font(.caption)
                 }
                 if row.disk?.partial == true { Text("* Medição parcial por falha de leitura.").font(.caption) }
-                Button("Limpar builds…") { model.prepare(row.tree,.clean) }.disabled(row.disk?.builds.isEmpty != false)
-                Button("Remover worktree…",role:.destructive) { model.prepare(row.tree,.remove) }
+                Button("Limpar builds…") { model.prepare([row.tree],.clean) }.disabled(row.disk?.builds.isEmpty != false)
+                Button("Remover worktree…",role:.destructive) { model.prepare([row.tree],.remove) }
             }.disabled(model.operating || row.tree.missing || row.tree.locked)
                 .padding(.leading,14).padding(.vertical,6).frame(maxWidth:.infinity,alignment:.leading)
         }
@@ -250,60 +265,61 @@ struct RootSettings: View {
     }
 }
 struct ConfirmationView: View {
-    let sheet: Model.Confirmation
+    let sheet: WorktreeBatch
     @ObservedObject var model: Model
     @State private var selected: Set<String>
-    init(sheet:Model.Confirmation,model:Model) {
+    init(sheet:WorktreeBatch,model:Model) {
         self.sheet = sheet; self.model = model
-        _selected = State(initialValue:Set(sheet.plan.disk.builds.map(\.path)))
+        _selected = State(initialValue:Set(sheet.plans.flatMap { $0.disk.builds.map(\.path) }))
     }
     var body: some View {
-        let plan = sheet.plan, clean = sheet.action == .clean
-        let discarding = !clean && !plan.state.changes.isEmpty
-        let removalTitle = plan.backupBranch == nil ? "Apagar worktree" : "Criar branch de backup e remover"
+        let clean = sheet.action == .clean
+        let discarding = !clean && sheet.plans.contains { !$0.state.changes.isEmpty }
+        let backup = sheet.plans.contains { $0.backupBranch != nil }
+        let removalTitle = backup ? "Criar branch de backup e remover" : "Apagar worktree"
         VStack(alignment:.leading,spacing:12) {
-            Text(clean ? "Limpar builds" : "Remover worktree").font(.title.bold())
-            Text(plan.tree.path).textSelection(.enabled)
-            Text((plan.tree.branch ?? "HEAD destacado") + "  ·  PR: " + (model.rows[plan.tree.path]?.pull?.label ?? "Desconhecido"))
-            if let branch = plan.backupBranch {
-                Label("HEAD destacado sem referência de backup",systemImage:"arrow.triangle.branch").font(.headline)
-                Text("Antes de remover a pasta, o app vai preservar o commit em uma branch local.")
-                Text(branch).font(.callout.monospaced()).textSelection(.enabled)
-            }
-            if discarding {
-                Label("As alterações sem commit serão perdidas, inclusive arquivos novos e alterações preparadas para commit.",systemImage:"exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-            } else {
-                Text(plan.state.changes.isEmpty ? "Git limpo" : "Há alterações locais fora dos builds selecionados.")
-            }
+            Text(clean ? "Limpar builds" : "Remover worktrees").font(.title.bold())
+            Text(sheet.plans.count == 1 ? "1 worktree elegível" : "\(sheet.plans.count) worktrees elegíveis").foregroundStyle(.secondary)
             ScrollView {
-                VStack(alignment:.leading,spacing:8) {
-                    if clean {
-                        ForEach(plan.disk.builds) { folder in
-                            Toggle(isOn:Binding(get:{ selected.contains(folder.path) },set:{ yes in
-                                if yes { selected.insert(folder.path) } else { selected.remove(folder.path) }
-                            })) { Text(String(folder.path.dropFirst(plan.tree.path.count+1)) + " · " + size(folder.bytes)) }
-                        }
-                    } else {
-                        Text("Todo o conteúdo da pasta · " + size(plan.disk.bytes)).font(.headline)
-                        if discarding {
-                            Text("Alterações locais a descartar").bold()
-                            ForEach(plan.state.changes.indices,id:\.self) { index in
-                                Text(verbatim:plan.state.changes[index]).font(.caption.monospaced()).textSelection(.enabled)
-                            }
-                        }
-                        Text("Arquivos e pastas ignorados fora dos builds").bold()
-                        if plan.otherIgnored.isEmpty { Text("Nenhum") }
-                        ForEach(plan.otherIgnored,id:\.self) { Text($0).font(.caption.monospaced()) }
-                        ForEach(plan.disk.builds) { Text("Build · " + $0.path) }
+                LazyVStack(alignment:.leading,spacing:10) {
+                    ForEach(sheet.plans,id:\.tree.path) { plan in
+                        details(plan, clean:clean)
+                        Divider()
+                    }
+                    if !sheet.skipped.isEmpty {
+                        Text("Fora da operação").font(.headline)
+                        ForEach(sheet.skipped,id:\.self) { Text($0).font(.callout) }
                     }
                 }.frame(maxWidth:.infinity,alignment:.leading)
-            }.frame(maxHeight:210)
+            }
             Text("A exclusão é permanente. Encerre os agentes e builds que estejam usando a pasta. O espaço recuperado em APFS pode variar.").font(.callout)
             HStack { Spacer(); Button("Cancelar") { model.confirmation = nil }.keyboardShortcut(.cancelAction)
-                Button(clean ? "Apagar builds selecionados" : (discarding ? "Apagar mesmo assim" : removalTitle),role:.destructive) {
+                Button(clean ? "Apagar builds selecionados" : (discarding ? "Apagar mesmo assim" : (sheet.plans.count > 1 ? "Remover worktrees selecionados" : removalTitle)),role:.destructive) {
                     model.apply(sheet,selection:selected,discardChanges:discarding)
-                }.disabled(clean && selected.isEmpty) }
-        }.padding(24).frame(width:540)
+                }.disabled(sheet.plans.isEmpty || (clean && selected.isEmpty)) }
+        }.padding(24).frame(width:600,height:460)
+    }
+    @ViewBuilder private func details(_ plan: Preview, clean: Bool) -> some View {
+        Text(plan.tree.path).font(.headline).textSelection(.enabled)
+        Text((plan.tree.branch ?? "HEAD destacado") + " · PR: " + (model.rows[plan.tree.path]?.pull?.label ?? "Desconhecido"))
+        if clean {
+            ForEach(plan.disk.builds) { folder in
+                Toggle(isOn:Binding(get:{ selected.contains(folder.path) },set:{ yes in
+                    if yes { selected.insert(folder.path) } else { selected.remove(folder.path) }
+                })) { Text(String(folder.path.dropFirst(plan.tree.path.count+1)) + " · " + size(folder.bytes)) }
+            }
+        } else {
+            Text("Todo o conteúdo da pasta · " + size(plan.disk.bytes))
+            if let backup = plan.backupBranch { Text("Backup do commit em " + backup).textSelection(.enabled) }
+            if !plan.state.changes.isEmpty {
+                Label("Alterações sem commit que serão perdidas",systemImage:"exclamationmark.triangle.fill").foregroundStyle(.orange)
+                ForEach(plan.state.changes.indices,id:\.self) { Text(verbatim:plan.state.changes[$0]).font(.caption.monospaced()) }
+            }
+            if !plan.otherIgnored.isEmpty {
+                Text("Arquivos e pastas ignorados fora dos builds").bold()
+                ForEach(plan.otherIgnored,id:\.self) { Text($0).font(.caption.monospaced()) }
+            }
+            ForEach(plan.disk.builds) { Text("Build · " + $0.path) }
+        }
     }
 }
