@@ -4,6 +4,8 @@ Aplicativo nativo para macOS que mostra quanto espaço os worktrees do Git ocupa
 
 A interface agrupa worktrees por ferramenta, incluindo Codex, Claude e GitHub Copilot. Selecione um item para ver o caminho, o espaço usado, a atividade Git e a situação do pull request. O painel indica quando a origem foi inferida. A consulta de PRs usa a autenticação local do GitHub CLI.
 
+![Tela do AI Disk Check no macOS com dados de exemplo, ocupação por ferramenta e lista de worktrees](docs/armazenamento.png)
+
 ## Compilar e abrir
 
 Em um Mac com macOS 14 ou posterior e as ferramentas de desenvolvimento do Xcode instaladas, execute na raiz do projeto:

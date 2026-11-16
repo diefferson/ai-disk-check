@@ -137,7 +137,8 @@ func gitState(_ tree: Tree) -> GitState {
 }
 enum Action { case clean, remove }
 struct Preview {
-    let tree: Tree, disk: Measure, state: GitState, ignored: [String], durable: Bool
+    let tree: Tree, disk: Measure, state: GitState, ignored: [String], backupBranch: String?
+    let indexDigest: SHA256.Digest?
     var otherIgnored: [String] {
         ignored.filter { rel in
             !disk.builds.contains { inside((tree.path + "/" + rel).trimmingTrailingSlash, $0.path) }
@@ -159,26 +160,51 @@ func preview(_ expected: Tree, action: Action) throws -> Preview {
     guard state.statusOK, !disk.partial else { throw Failure("Leitura incompleta. Confira as permissões e atualize.") }
     let ignored = git(tree.path, ["ls-files","--others","--ignored","--exclude-standard","--directory","-z"])
     guard ignored.code == 0 else { throw Failure("Falha ao conferir arquivos ignorados.") }
-    var durable = tree.branch != nil
-    if !durable {
-        let refs = git(tree.path, ["for-each-ref","--contains",tree.head,"--format=%(refname)","refs/heads","refs/tags","refs/remotes"])
-        durable = refs.code == 0 && !refs.text.isEmpty
-    }
+    var backupBranch: String?
+    var indexDigest: SHA256.Digest?
     if action == .remove {
-        guard durable else { throw Failure("HEAD destacado sem branch, tag ou referência remota que preserve o commit.") }
-        guard state.changes.isEmpty else { throw Failure("Há alterações locais. Preserve-as antes de remover o worktree.") }
+        if !state.changes.isEmpty {
+            let index = git(tree.path, ["ls-files","--stage","-z"])
+            guard index.code == 0 else { throw Failure("Falha ao conferir as alterações preparadas para commit.") }
+            indexDigest = SHA256.hash(data:index.data)
+        }
         guard !disk.nested else { throw Failure("O diretório contém outro repositório ou volume.") }
+        if tree.branch == nil {
+            let refs = git(tree.path, ["for-each-ref","--contains",tree.head,"--format=%(refname)","refs/heads","refs/tags","refs/remotes"])
+            guard refs.code == 0 else { throw Failure("Falha ao verificar as referências que preservam o commit.") }
+            if refs.text.isEmpty {
+                backupBranch = "backup/worktree-" + tree.head.prefix(12) + "-" + UUID().uuidString.prefix(8).lowercased()
+            }
+        }
     }
-    return Preview(tree: tree,disk: disk,state: state,ignored: ignored.fields.sorted(),durable: durable)
+    return Preview(tree: tree,disk: disk,state: state,ignored: ignored.fields.sorted(),backupBranch: backupBranch,indexDigest:indexDigest)
 }
-func execute(_ plan: Preview, action: Action, selection: Set<String>) throws -> String {
+func execute(_ plan: Preview, action: Action, selection: Set<String>, discardChanges: Bool = false) throws -> String {
     let current = try preview(plan.tree, action: action)
     guard current.disk.stamp == plan.disk.stamp, current.state == plan.state, current.ignored == plan.ignored,
-          current.disk.builds == plan.disk.builds else { throw Failure("O conteúdo mudou desde a prévia. Abra uma nova confirmação.") }
+          current.disk.builds == plan.disk.builds, current.indexDigest == plan.indexDigest else { throw Failure("O conteúdo mudou desde a prévia. Abra uma nova confirmação.") }
     if action == .remove {
-        guard git(plan.tree.main, ["worktree","remove","--",plan.tree.path]).code == 0 else {
-            throw Failure("O Git recusou a remoção. Confira o estado do worktree.")
+        let dirty = !current.state.changes.isEmpty
+        guard !dirty || discardChanges else { throw Failure("Confirme o descarte das alterações locais para remover o worktree.") }
+        guard current.backupBranch == nil || plan.backupBranch != nil else {
+            throw Failure("O commit agora precisa de uma branch de backup. Abra uma nova confirmação.")
         }
+        if let backup = plan.backupBranch {
+            guard git(plan.tree.main, ["branch","--no-track",backup,plan.tree.head]).code == 0 else {
+                throw Failure("O Git recusou a criação da branch " + backup + ". O worktree foi mantido.")
+            }
+            let ref = git(plan.tree.main, ["show-ref","--verify","--hash","refs/heads/" + backup])
+            guard ref.code == 0, ref.text == plan.tree.head,
+                  (try? listing(plan.tree.main).first(where: { $0.path == plan.tree.path })) == plan.tree else {
+                throw Failure("Falha ao revalidar a branch " + backup + " ou o worktree. A remoção foi interrompida.")
+            }
+        }
+        let arguments = ["worktree","remove"] + (dirty ? ["--force"] : []) + ["--",plan.tree.path]
+        guard git(plan.tree.main, arguments).code == 0 else {
+            let detail = plan.backupBranch.map { " Branch de backup criada: " + $0 } ?? " Confira o estado do worktree."
+            throw Failure("O Git recusou a remoção." + detail)
+        }
+        if let backup = plan.backupBranch { return "Worktree removido. Commit preservado na branch local " + backup + "." }
         return "Worktree removido. Branches preservadas."
     }
     guard !selection.isEmpty, selection.isSubset(of: Set(current.disk.builds.map(\.path))) else { throw Failure("Seleção de builds inválida.") }

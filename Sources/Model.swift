@@ -124,11 +124,11 @@ import SwiftUI
             operating = false
         }
     }
-    func apply(_ sheet: Confirmation, selection: Set<String>) {
+    func apply(_ sheet: Confirmation, selection: Set<String>, discardChanges: Bool) {
         confirmation = nil; operating = true
         Task {
             do {
-                alert = try await Task.detached(priority:.userInitiated) { try execute(sheet.plan,action:sheet.action,selection:selection) }.value
+                alert = try await Task.detached(priority:.userInitiated) { try execute(sheet.plan,action:sheet.action,selection:selection,discardChanges:discardChanges) }.value
             } catch { alert = error.localizedDescription }
             let tree = sheet.plan.tree
             changedDuringScan.insert(tree.path)

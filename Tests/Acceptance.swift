@@ -68,7 +68,8 @@ import Foundation
         try write(work + "/app/build/tracked","source")
         try command(work,["add","-f","app/build/tracked"])
         try write(work + "/Package.swift","// user edit")
-        try refused { _ = try preview(tree,action:.remove) }
+        let dirtyPlan = try preview(tree,action:.remove)
+        try refused { _ = try execute(dirtyPlan,action:.remove,selection:[]) }
         let plan = try preview(tree,action:.clean)
         try check(plan.disk.builds.count == 1 && plan.disk.builds[0].path == work + "/.build","exclusão de links externos e arquivos rastreados")
         try check(plan.otherIgnored.contains(".env"),"prévia inclui .env")
@@ -105,9 +106,27 @@ import Foundation
         try check(!fm.fileExists(atPath:work) && git(main,["show-ref","--verify","refs/heads/task"]).code == 0,"remoção preserva branch")
         try command(main,["worktree","add","--detach",work]); try command(work,["commit","--allow-empty","-m","detached"])
         let detached = try listing(main)[0]
-        try refused { _ = try preview(detached,action:.remove) }
         try command(main,["tag","preserved",detached.head])
-        _ = try preview(detached,action:.remove)
+        let protected = try preview(detached,action:.remove)
+        try check(protected.backupBranch == nil,"tag já preserva HEAD")
+        try command(main,["tag","-d","preserved"])
+        try refused { _ = try execute(protected,action:.remove,selection:[]) }
+        let recovery = try preview(detached,action:.remove)
+        guard let backup = recovery.backupBranch else { throw Failure("Backup esperado para HEAD destacado.") }
+        try command(main,["branch",backup,"main"])
+        try refused { _ = try execute(recovery,action:.remove,selection:[]) }
+        try check(fm.fileExists(atPath:work) && git(main,["rev-parse",backup]).text == git(main,["rev-parse","main"]).text,"colisão preserva pasta e branch existente")
+        try write(work + "/Package.swift","staged")
+        try command(work,["add","Package.swift"])
+        try write(work + "/Package.swift","unstaged")
+        try write(work + "/new.txt","untracked")
+        let outdated = try preview(detached,action:.remove)
+        try write(work + "/new.txt","changed after preview")
+        try refused { _ = try execute(outdated,action:.remove,selection:[],discardChanges:true) }
+        let retry = try preview(detached,action:.remove)
+        guard let saved = retry.backupBranch else { throw Failure("Backup esperado na nova prévia.") }
+        _ = try execute(retry,action:.remove,selection:[],discardChanges:true)
+        try check(!fm.fileExists(atPath:work) && git(main,["rev-parse","refs/heads/" + saved]).text == detached.head,"backup preserva o commit exato após remoção")
         let store = try Store(directory:url(base + "/cache"))
         try store.save("sample",items); try check(store.read("sample",as:[Tree].self) == items,"SQLite")
         print("OK · inventário, du, builds, Git, PRs simulados, limpeza, revalidação e SQLite")

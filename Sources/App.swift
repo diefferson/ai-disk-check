@@ -259,11 +259,23 @@ struct ConfirmationView: View {
     }
     var body: some View {
         let plan = sheet.plan, clean = sheet.action == .clean
+        let discarding = !clean && !plan.state.changes.isEmpty
+        let removalTitle = plan.backupBranch == nil ? "Apagar worktree" : "Criar branch de backup e remover"
         VStack(alignment:.leading,spacing:12) {
             Text(clean ? "Limpar builds" : "Remover worktree").font(.title.bold())
             Text(plan.tree.path).textSelection(.enabled)
             Text((plan.tree.branch ?? "HEAD destacado") + "  ·  PR: " + (model.rows[plan.tree.path]?.pull?.label ?? "Desconhecido"))
-            Text(plan.state.changes.isEmpty ? "Git limpo" : "Há alterações locais fora dos builds selecionados.")
+            if let branch = plan.backupBranch {
+                Label("HEAD destacado sem referência de backup",systemImage:"arrow.triangle.branch").font(.headline)
+                Text("Antes de remover a pasta, o app vai preservar o commit em uma branch local.")
+                Text(branch).font(.callout.monospaced()).textSelection(.enabled)
+            }
+            if discarding {
+                Label("As alterações sem commit serão perdidas, inclusive arquivos novos e alterações preparadas para commit.",systemImage:"exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+            } else {
+                Text(plan.state.changes.isEmpty ? "Git limpo" : "Há alterações locais fora dos builds selecionados.")
+            }
             ScrollView {
                 VStack(alignment:.leading,spacing:8) {
                     if clean {
@@ -274,6 +286,12 @@ struct ConfirmationView: View {
                         }
                     } else {
                         Text("Todo o conteúdo da pasta · " + size(plan.disk.bytes)).font(.headline)
+                        if discarding {
+                            Text("Alterações locais a descartar").bold()
+                            ForEach(plan.state.changes.indices,id:\.self) { index in
+                                Text(verbatim:plan.state.changes[index]).font(.caption.monospaced()).textSelection(.enabled)
+                            }
+                        }
                         Text("Arquivos e pastas ignorados fora dos builds").bold()
                         if plan.otherIgnored.isEmpty { Text("Nenhum") }
                         ForEach(plan.otherIgnored,id:\.self) { Text($0).font(.caption.monospaced()) }
@@ -283,8 +301,8 @@ struct ConfirmationView: View {
             }.frame(maxHeight:210)
             Text("A exclusão é permanente. Encerre os agentes e builds que estejam usando a pasta. O espaço recuperado em APFS pode variar.").font(.callout)
             HStack { Spacer(); Button("Cancelar") { model.confirmation = nil }.keyboardShortcut(.cancelAction)
-                Button(clean ? "Apagar builds selecionados" : "Apagar worktree",role:.destructive) {
-                    model.apply(sheet,selection:selected)
+                Button(clean ? "Apagar builds selecionados" : (discarding ? "Apagar mesmo assim" : removalTitle),role:.destructive) {
+                    model.apply(sheet,selection:selected,discardChanges:discarding)
                 }.disabled(clean && selected.isEmpty) }
         }.padding(24).frame(width:540)
     }
